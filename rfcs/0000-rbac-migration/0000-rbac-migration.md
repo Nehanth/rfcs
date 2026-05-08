@@ -24,9 +24,11 @@ seven legacy tables collapse into a single `role_permissions` table.
 
 The migration ships in two phases. Phase 1 added the role surface as a
 parallel write path. Phase 2 (in progress) backfills the legacy tables into
-`role_permissions`, removes the per-resource REST endpoints, and stages a
-graduation migration that drops the legacy tables outright. The end state is
-a single permission table and a single grant API.
+`role_permissions`, deprecates the per-resource REST endpoints (with
+deprecation warnings, targeted for removal one release later), removes the
+workspace-permission endpoints, and stages a graduation migration that drops
+the legacy tables outright. The end state is a single permission table and a
+single grant API.
 
 # Basic example
 
@@ -282,12 +284,24 @@ predicate.
 
 ### Wire surface
 
-Phase 2 removes:
+Phase 2 changes the wire surface in two parts.
+
+**Deprecated** (still available; emit a deprecation warning; backed by
+synthetic per-user role grants under the hood):
 
 - `POST/GET/PATCH/DELETE` on `/mlflow/{experiments,registered-models,scorers}/permissions`
 - `POST/GET/PATCH/DELETE` on `/mlflow/gateway/{secrets,endpoints,model-definitions}/permissions`
+- The ~26 corresponding `AuthServiceClient` per-resource methods
+  (`create_experiment_permission`, `update_registered_model_permission`, etc.)
+
+These keep working for one release as a compatibility courtesy, then are
+removed in a follow-up release. Existing scripts won't break on upgrade; new
+code should use the role API directly.
+
+**Removed** (calls 404):
+
 - `POST/GET/PATCH/DELETE` on `/mlflow/workspaces/<workspace>/permissions`
-- ~30 corresponding `AuthServiceClient` methods
+- The four `*_workspace_permission` `AuthServiceClient` methods
 
 The role surface (`create_role`, `add_role_permission`, `assign_role`,
 `unassign_role`, `list_user_roles`, etc.) is the only path going forward.
@@ -297,11 +311,14 @@ admin UI's *Direct permissions* section.
 
 ## Drawbacks
 
-**Breaking wire change.** The per-resource permission endpoints are
-removed. Any client that called `POST /experiments/permissions/create` or a
-sibling needs to be rewritten to use the role API. This is the largest cost
-of the proposal. The migration is one-way: we are not maintaining the old
-endpoints behind a flag.
+**Breaking wire change.** The workspace-permission endpoints are removed
+outright; the per-resource permission endpoints are deprecated for one
+release and then removed. Any client that called `POST /experiments/permissions/create`
+or a sibling needs to be rewritten to use the role API by the removal
+release; calls to `POST /workspaces/<ws>/permissions` and the four
+`*_workspace_permission` client methods break immediately. The migration is
+one-way: we are not maintaining the old endpoints behind a flag past the
+deprecation window.
 
 **Two grant shapes for one logical operation.** "Grant Alice EDIT on
 experiment 42" can land as a direct permission or as a role. The two have
@@ -374,8 +391,10 @@ load-bearing. This is a non-breaking addition.
 **Phase 2 (in progress)** is the breaking part. The backfill migration
 walks the seven legacy tables and writes equivalent rows into
 `role_permissions` under synthetic per-user roles. The auth server flips to
-reading from `role_permissions` only. The legacy REST endpoints are
-removed. The legacy tables remain on disk.
+reading from `role_permissions` only. The workspace-permission endpoints
+are removed; the per-resource permission endpoints are deprecated (still
+work, emit a deprecation warning) and slated for removal one release later.
+The legacy tables remain on disk.
 
 Operators upgrading need to:
 
