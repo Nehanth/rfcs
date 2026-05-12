@@ -24,11 +24,14 @@ seven legacy tables collapse into a single `role_permissions` table.
 
 The migration ships in two phases. Phase 1 added the role surface as a
 parallel write path. Phase 2 (in progress) backfills the legacy tables into
-`role_permissions`, deprecates the per-resource REST endpoints (with
-deprecation warnings, targeted for removal one release later), removes the
-workspace-permission endpoints, and stages a graduation migration that drops
-the legacy tables outright. The end state is a single permission table and a
-single grant API.
+`role_permissions` and removes all legacy permission endpoints — 25
+per-resource methods plus 4 workspace-permission methods — outright at the
+same upgrade. New `grant_user_permission` / `revoke_user_permission`
+convenience APIs replace the per-resource calls for one-off direct grants
+without a deprecation-warning surface. The legacy tables stay on disk as a
+paused snapshot; operators can drop them manually with guidance in the
+release notes. The end state is a single permission table and a coherent
+grant API.
 
 # Basic example
 
@@ -58,9 +61,19 @@ POST /api/2.0/mlflow/experiments/permissions/create
 **Proposed.** Two paths, depending on whether the grant is genuinely one-off
 or part of a recurring pattern.
 
-*Direct permission* — closest 1-to-1 with the old call. Internally backed by
-a synthetic per-user role (`__user_<id>__`); same `role_permissions`
-storage, no special-casing in the resolver. UI: `/admin` → Users → Alice
+*Direct permission* — closest 1-to-1 with the old call. New convenience
+API:
+
+```http
+POST /api/3.0/mlflow/users/permissions/grant
+{ "username": "alice", "resource_type": "experiment",
+  "resource_id": "42", "permission": "EDIT" }
+```
+
+Internally backed by a synthetic per-user role (`__user_<id>__`); same
+`role_permissions` storage, no special-casing in the resolver. Gated by
+per-resource MANAGE (same authority model as the legacy endpoint, just
+a different method name). UI: `/admin` → Users → Alice
 → **Edit access** → *Direct permissions* section → add `experiment:42 →
 EDIT` → review → apply.
 
@@ -141,19 +154,26 @@ ml-research data scientists" as a unit.
 Second, the storage is split across seven tables (`experiment_permissions`,
 `registered_model_permissions`, the four `gateway_*_permissions` tables,
 `scorer_permissions`, and `workspace_permissions`) with inconsistent
-workspace-awareness. Some tables have a workspace column and some don't.
-Resolving "what can Alice do here?" requires walking each table.
+workspace-awareness. Some tables have a workspace column and some don't —
+which itself reflects an asymmetry in resource identity (registered models
+are keyed by `(name, workspace)`, experiments by a globally-unique id), but
+the storage shape doesn't paper over the asymmetry, so each resolver path
+has to handle it. Resolving "what can Alice do here?" requires walking
+each table.
 
 Third, the permission resolution logic carries cumulative complexity from
 the per-table layout. Auth-server code that filters list / search results,
-cascades on resource delete, and renames on rename has to fan out across all
-seven shapes. The on-disk surface (~1000 LoC of per-resource CRUD, ~16 REST
-endpoints, ~30 `AuthServiceClient` methods) is a function of that fan-out.
+propagates resource deletes, and propagates resource renames has to fan out
+across all seven shapes. The on-disk surface (~1000 LoC of per-resource
+CRUD, ~16 REST endpoints, ~30 `AuthServiceClient` methods) is a function
+of that fan-out.
 
 Roles fix all three. A role is a named, reusable bundle of permissions.
 Storage collapses to one `role_permissions` table indexed by role. Resolution
 is "look up the user's roles, union the permissions, evaluate against the
-request" — no per-table fan-out.
+request" — no per-table fan-out. (Role cardinality is typically small enough
+that per-role access caching is tractable; not implemented here, but the
+data shape supports it as a future optimisation.)
 
 ### Out of scope
 
@@ -169,7 +189,14 @@ request" — no per-table fan-out.
   authorization without obvious benefit at this scale.
 - **A "permission viewer" UI for end users.** The current admin UI is for
   operators. End users don't yet have a "what can I see?" view; would be a
-  follow-up if requested.
+  follow-up if requested. The new
+  [`check_user_permission` endpoint](#wire-surface) is the building block
+  it would use.
+- **Pluggable authorization resolver.** The resolver is SQL-store-only in
+  this RFC. The interface is small enough that an external integration
+  (e.g. Kubeflow's `mlflow-integration` resolving via Kubernetes
+  SubjectAccessReview) could plug in later; flagged as a known
+  extension point in the Wire surface section, not designed here.
 
 ## Detailed design
 
@@ -188,30 +215,59 @@ Three tables replace seven:
   workspace `bar`.
 - `role_permissions` — `(id, role_id, resource_type, resource_pattern,
   permission)`. The pattern is either a literal resource id or `*`
-  (workspace-wide for that resource type).
+  (workspace-wide for that resource type). `resource_pattern` absorbs the
+  identity asymmetry between resource types: a `registered_model` pattern
+  matches by name within the role's workspace, while an `experiment`
+  pattern matches by globally-unique id.
 - `user_role_assignments` — `(id, user_id, role_id)`. A user can hold any
   number of roles in any number of workspaces.
 
-The legacy tables remain on disk through Phase 2 for rollback safety. They
-are no longer read or written by the auth server post-backfill, but the
-schema stays. The graduation PR (#23089) drops them; it is staged but
-deferred until at least one full release cycle of bake time on the
-simplified model.
+The legacy tables remain on disk post-migration as a paused snapshot for
+rollback safety. They are no longer read or written by the auth server,
+but no automated migration drops them — operators who want to reclaim the
+disk space drop them manually, with timing called out in the release notes.
+We considered an automated graduation migration and decided the small
+permanent overhead is preferable to a destructive automated step on a
+feature this new.
+
+#### Resource types
+
+`VALID_RESOURCE_TYPES` enumerates the resource slots the resolver
+recognises: `experiment`, `registered_model`, `prompt`, `scorer`,
+`gateway_secret`, `gateway_endpoint`, `gateway_model_definition`, plus the
+special `workspace` slot for workspace-wide grants. The `prompt` type is
+new in this RFC; pre-RBAC, prompts reused `registered_model` endpoints,
+which made permissioning awkward (granting `(registered_model, foo, READ)`
+on a prompt-typed name purely because the wire surface was shared). The
+backfill migration rewrites existing `(registered_model, <name>, *)` rows
+to `(prompt, <name>, *)` for any name that the registry classifies as a
+prompt.
 
 ### Per-user direct grants
 
 Pre-RBAC, an operator could POST a per-resource permission for a single
-user. We preserve that affordance by treating it as a synthetic per-user
-role: each user has at most one `__user_<id>__` role per workspace, owned by
-the auth system, surfaced in the admin UI's *Direct permissions* section
-but otherwise invisible. Direct permissions are stored as
-`role_permissions` rows under that synthetic role — no special-casing in the
-resolver.
+user. We preserve that affordance through two related mechanisms.
 
-This means the same permission resolution path handles both "permission via
-shared role" and "permission via direct grant." The difference is purely
-authorial: a direct grant is one user's name on a permission, a role is a
-named bundle that anyone can be assigned to.
+Under the hood, each user has at most one `__user_<id>__` role per
+workspace, owned by the auth system. Direct permissions are stored as
+`role_permissions` rows under that synthetic role — no special-casing in
+the resolver. The `__user_<id>__` name pattern is reserved by the auth
+store: `create_role` and `update_role` reject it, so operators cannot
+collide a regular role with a user's synthetic slot.
+
+On the API surface, the new `grant_user_permission` /
+`revoke_user_permission` convenience methods (gated by per-resource
+MANAGE) are the typical write path; the admin UI's *Direct permissions*
+section is the same operation through the UI. Internally both paths
+write to the synthetic role. The legacy
+`create_experiment_permission` / `update_*_permission` family also wrote
+to this slot, but those methods are removed in Phase 2 — the convenience
+APIs are their non-deprecated replacement.
+
+The result: the same permission resolution path handles both "permission
+via shared role" and "permission via direct grant." The difference is
+purely authorial — a direct grant is one user's name on a permission, a
+role is a named bundle that anyone can be assigned to.
 
 ### Workspace-level grants
 
@@ -221,8 +277,11 @@ this to a single workspace permission slot:
 `(resource_type='workspace', resource_pattern='*', permission)` where
 `permission` is `USE` (member: read everything in the workspace, create
 experiments / registered models) or `MANAGE` (admin: full authority,
-including role/user management within the workspace). No third tier — the
-two-level model matched the actual usage we observed in the legacy tier.
+including role/user management within the workspace). The two-tier shape
+reflects the natural USE-vs-MANAGE split for workspace-level grants;
+deeper tiers (READ / EDIT at workspace scope) would proliferate without
+clear operational value, and per-resource grants already cover the
+intermediate levels where needed.
 
 ### Permission resolution
 
@@ -259,7 +318,10 @@ edits.
 A **regular user** is any other authenticated identity. Their authorization
 flows entirely through role-derived permissions.
 
-### Workspace context
+### UI workspace context
+
+This section describes the frontend routing detail that surfaces workspace
+context in the admin UI; it is not part of the authorization model itself.
 
 Workspaces are conveyed through the URL via the `?workspace=<name>` query
 param. A frontend component `WorkspaceRouterSync` extracts the param on
@@ -284,41 +346,110 @@ predicate.
 
 ### Wire surface
 
-Phase 2 changes the wire surface in two parts.
-
-**Deprecated** (still available; emit a deprecation warning; backed by
-synthetic per-user role grants under the hood):
-
-- `POST/GET/PATCH/DELETE` on `/mlflow/{experiments,registered-models,scorers}/permissions`
-- `POST/GET/PATCH/DELETE` on `/mlflow/gateway/{secrets,endpoints,model-definitions}/permissions`
-- The ~26 corresponding `AuthServiceClient` per-resource methods
-  (`create_experiment_permission`, `update_registered_model_permission`, etc.)
-
-These keep working for one release as a compatibility courtesy, then are
-removed in a follow-up release. Existing scripts won't break on upgrade; new
-code should use the role API directly.
+Phase 2 removes the legacy per-resource and workspace permission surfaces
+outright; there is no deprecation-warning window. basic-auth is still
+marked experimental, so a clean cut is preferable to carrying 25 warning-
+emitting methods through a release. A one-time backfill migration moves
+all existing grant rows into the new `role_permissions` storage; after
+the upgrade, callers use either the role API directly or the new
+convenience APIs (below).
 
 **Removed** (calls 404):
 
+- `POST/GET/PATCH/DELETE` on `/mlflow/{experiments,registered-models,scorers}/permissions`
+- `POST/GET/PATCH/DELETE` on `/mlflow/gateway/{secrets,endpoints,model-definitions}/permissions`
 - `POST/GET/PATCH/DELETE` on `/mlflow/workspaces/<workspace>/permissions`
+- The corresponding 25 per-resource `AuthServiceClient` methods
+  (`create_experiment_permission`, `update_registered_model_permission`, etc.)
 - The four `*_workspace_permission` `AuthServiceClient` methods
 
-The role surface (`create_role`, `add_role_permission`, `assign_role`,
-`unassign_role`, `list_user_roles`, etc.) is the only path going forward.
-Direct per-user grants land via the same role API: clients construct a
-synthetic per-user role on demand, or — more commonly — go through the
-admin UI's *Direct permissions* section.
+**New role API** (the primary path):
+
+- `POST /mlflow/roles/create`, `GET /mlflow/roles/get`,
+  `GET /mlflow/roles/list`, `PATCH /mlflow/roles/update`,
+  `DELETE /mlflow/roles/delete`
+- `POST /mlflow/roles/permissions/add`,
+  `PATCH /mlflow/roles/permissions/update`,
+  `POST /mlflow/roles/permissions/remove`,
+  `GET /mlflow/roles/permissions/list`
+- `POST /mlflow/roles/assign`, `POST /mlflow/roles/unassign`,
+  `GET /mlflow/users/roles/list`, `GET /mlflow/roles/users/list`
+
+Gated by workspace MANAGE or Platform Admin
+(`validate_can_manage_roles`). Creating roles is an administrative action;
+this is by design.
+
+**New convenience APIs** (the read/write counterparts for one-user,
+one-resource direct grants):
+
+- `POST /mlflow/users/permissions/grant`
+  `{ username, resource_type, resource_id, permission }`
+- `POST /mlflow/users/permissions/revoke`
+  `{ username, resource_type, resource_id }`
+- `POST /mlflow/auth/check`
+  `{ username, resource_type, resource_id, workspace? }`
+  `→ { allowed: bool, permission: str }`
+
+Client methods: `grant_user_permission`, `revoke_user_permission`,
+`check_user_permission` on `AuthServiceClient`.
+
+`grant_user_permission` and `revoke_user_permission` are the
+non-deprecated replacement for the legacy
+`create_experiment_permission` / `update_*_permission` family. They
+write to the user's `__user_<id>__` synthetic role under the hood — same
+storage path the legacy methods used — and are gated by **per-resource
+MANAGE** (same validator as the legacy endpoints), so a user with
+`(experiment, 42, MANAGE)` can still delegate on experiment 42. This
+preserves the per-resource owner-delegation workflow without carrying
+a deprecation-warning surface.
+
+`check_user_permission` mirrors Kubernetes SubjectAccessReview: it
+resolves through the same code path as the runtime authorization check
+(`_get_*_permission` family), so the answer is guaranteed consistent
+with what an actual request would see. Useful for admin-UI debugging
+("why can't Bob delete experiment 42?"), for the UI to gate elements
+before issuing the real request, and for automation that wants to
+dry-run access decisions.
+
+### API style: RPC
+
+All new auth endpoints follow the RPC convention already established by
+MLflow's auth surface (`POST /mlflow/users/create`,
+`POST /mlflow/users/delete`, `POST /mlflow/experiments/create`, …). A
+REST-shaped role API
+(`PUT /mlflow/roles/{id}/users/{username}`, etc.) was considered and
+deferred — mixing styles across the auth surface would be worse than the
+current consistency. A future major-version revision could re-shape both
+the user-management and role-management halves at once, but this RFC
+keeps the established style.
+
+### Extension point: resolver interface
+
+Authorization resolution is SQL-store-only in this RFC. The relevant
+interface is small — essentially `get_role_permission_for_resource(user,
+resource_type, resource_id, workspace)` and
+`list_accessible_workspace_names(username)` — and the obvious future
+abstraction is a protocol that lets a deployment plug in an external
+resolver. A concrete motivating case is Kubeflow's `mlflow-integration`,
+which could answer authorization queries via Kubernetes
+SubjectAccessReview rather than maintain a parallel grant store. Out of
+scope for this RFC; called out so the SQL-store coupling is intentional
+rather than accidental, and so a future extension RFC has a known
+hook-in point.
 
 ## Drawbacks
 
-**Breaking wire change.** The workspace-permission endpoints are removed
-outright; the per-resource permission endpoints are deprecated for one
-release and then removed. Any client that called `POST /experiments/permissions/create`
-or a sibling needs to be rewritten to use the role API by the removal
-release; calls to `POST /workspaces/<ws>/permissions` and the four
-`*_workspace_permission` client methods break immediately. The migration is
-one-way: we are not maintaining the old endpoints behind a flag past the
-deprecation window.
+**Breaking wire change.** All legacy permission endpoints — the 25
+per-resource ones and the four workspace-permission ones — are removed
+outright at the upgrade that lands the simplified RBAC model. There is no
+deprecation-warning window. Any client that called
+`POST /experiments/permissions/create` or a sibling needs to be rewritten
+to either the role API (for reusable grants) or the new convenience APIs
+(`grant_user_permission` / `revoke_user_permission`, for one-off direct
+grants) before upgrading. basic-auth is still experimental, so the
+breakage cost is acceptable; the alternative — carrying 25
+warning-emitting methods through a release — has a higher long-term
+maintenance cost.
 
 **Two grant shapes for one logical operation.** "Grant Alice EDIT on
 experiment 42" can land as a direct permission or as a role. The two have
@@ -328,11 +459,16 @@ one-off. Operators have to make a choice each time. We mitigate this with
 documentation: prefer roles, use direct permissions when the grant is
 genuinely one user.
 
-**Synthetic-role artifacts in role listings.** The `__user_<id>__` synthetic
-roles exist as `roles` rows. The admin UI filters them out (the user-facing
-"roles" view never shows them), but a low-level operator inspecting the
-database will see them. We treat this as acceptable: it keeps the resolver
-single-path, which is worth more than a hidden row.
+**Synthetic-role artifacts in role listings.** The `__user_<id>__`
+synthetic roles exist as `roles` rows. They are returned by `list_roles`
+alongside admin-managed roles (we do not filter them at the API layer)
+and the admin UI does not specially hide them either; an operator
+inspecting the database or the Roles tab will see them. The
+`_reject_synthetic_role_name` guard prevents collisions but doesn't make
+them invisible. We treat this as acceptable: keeping the resolver
+single-path is worth more than a hidden row, and the name pattern makes
+them easy to recognise. A future iteration could filter them at the
+handler layer if operator feedback suggests it.
 
 **Migration backfill complexity.** The Alembic migration has to translate
 seven tables' worth of grants into role rows correctly. The mapping is not
@@ -390,19 +526,23 @@ load-bearing. This is a non-breaking addition.
 
 **Phase 2 (in progress)** is the breaking part. The backfill migration
 walks the seven legacy tables and writes equivalent rows into
-`role_permissions` under synthetic per-user roles. The auth server flips to
-reading from `role_permissions` only. The workspace-permission endpoints
-are removed; the per-resource permission endpoints are deprecated (still
-work, emit a deprecation warning) and slated for removal one release later.
-The legacy tables remain on disk.
+`role_permissions` under synthetic per-user roles. The auth server flips
+to reading from `role_permissions` only. All legacy permission endpoints
+(25 per-resource + 4 workspace-permission) are removed at the same
+upgrade; there is no deprecation-warning window. The legacy tables remain
+on disk as a paused snapshot for rollback safety; no automated migration
+drops them.
 
 Operators upgrading need to:
 
-1. **Audit clients.** Any deployment that relies on the per-resource
-   permission endpoints needs to migrate to the role API. The synthetic
-   per-user role pattern (`__user_<id>__`) is the closest direct analogue
-   if a deployment really wants to keep per-user direct grants. A migration
-   guide in the changelog will spell this out.
+1. **Audit clients and migrate calls.** Replace
+   `create_experiment_permission(exp_id, username, permission)` etc.
+   with either
+   - `grant_user_permission(username, "experiment", exp_id, permission)`
+     for one-off direct grants (closest 1-to-1 replacement), or
+   - The role API (`create_role` + `add_role_permission` + `assign_role`)
+     for reusable grants.
+   The changelog includes a per-method migration table.
 2. **Re-evaluate workspace permissions.** Workspace `MANAGE` semantics no
    longer fan out implicitly to every resource type. Operators who relied
    on the implicit fan-out need to either grant explicit `(resource_type,
@@ -413,25 +553,23 @@ Operators upgrading need to:
    role-derived grants match expectations on a staging copy before
    upgrading production. The migration is reversible by downgrade if
    needed.
+4. **Optionally drop legacy tables.** After the simplified model has
+   shipped for at least one minor release and operators have confirmed
+   their grants, the release notes document a SQL snippet to drop the
+   seven legacy permission tables for any deployment that wants to
+   reclaim the disk space. No automated migration runs this; it's an
+   opt-in cleanup.
 
-**Phase 3 (deferred to MLflow 3.X+2)** is the graduation: drop the legacy
-tables. By that point the simplified model has shipped in a release and had
-at least one minor cycle of bake time. Until then the rollback path is
-"downgrade the server."
-
-**Owner-delegation behavior change.** Pre-RBAC, a resource creator with
-`MANAGE` could delegate permissions on that resource to others. Post-RBAC,
-grant delegation requires workspace-admin or super-admin authority.
-Deployments that relied on owner-delegation either need to elevate
-workspace admins or accept that rebinding goes through the role API. We
-flag this in the changelog as a behavioral shift, not a bug.
+**Owner-delegation.** Per-resource MANAGE retains delegation via the new
+`grant_user_permission` / `revoke_user_permission` convenience APIs (same
+per-resource MANAGE validator as the legacy endpoints they replace). A
+user with `(experiment, 42, MANAGE)` can still share experiment 42 with
+another user one-off. The role API itself remains admin-only — creating
+roles, assigning users, attaching grants to roles is a workspace-admin /
+super-admin action by design. The behavioural shift versus pre-RBAC is
+purely API-surface: same authority model, different method name.
 
 # Open questions
-
-**Graduation cadence.** The graduation PR drops the legacy tables. We've
-proposed waiting one release cycle (MLflow 3.X+2 where 3.X is the release
-that ships the backfill). Is one release enough bake time, or should we
-hold longer to give operators time to validate? Open to feedback.
 
 **Group / team support.** We deferred groups out of scope, but the
 `role_permissions` storage shape is forward-compatible with adding
@@ -440,12 +578,15 @@ to lock in the upgrade path, or leave it for a future RFC when the demand
 crystallizes?
 
 **Direct-permission ergonomics.** The synthetic per-user role pattern is
-clean at the storage layer but slightly awkward to explain. An alternative
-would be a separate `direct_permissions` table (one row per direct grant),
-keeping `role_permissions` strictly for shared roles. This would simplify
-the mental model at the cost of two read paths in the resolver. We chose
-the synthetic-role path; flagging in case reviewers feel the trade-off
-should go the other way.
+clean at the storage layer but slightly awkward to explain. The new
+`grant_user_permission` / `revoke_user_permission` convenience APIs hide
+the synthetic role at the surface; operators see a familiar
+`(username, resource, permission)` shape. An alternative would be a
+separate `direct_permissions` table (one row per direct grant), keeping
+`role_permissions` strictly for shared roles. We chose the synthetic-role
+path because the resolver stays single-path; flagging in case reviewers
+feel the storage-layer simplicity isn't worth the slight
+explanation overhead.
 
 **Per-workspace admin UI structure.** The current implementation splits
 `/admin` (platform) from `/admin/ws?workspace=…` (per-workspace). A
