@@ -461,6 +461,26 @@ workspace-A admin against resources in workspace B are denied; unknown
 resources also deny rather than leak a deterministic `allowed = false`
 across all workspaces. This is fail-closed by design.
 
+### Inspection / debugging workflow
+
+For "why can't Bob delete experiment 42?" the workflow is two existing
+calls:
+
+1. `list_user_roles(username)` — returns every role assigned to the user,
+   including the synthetic `__user_<id>__` role that holds direct
+   grants. Shared-role grants and direct grants both surface in one
+   call, as raw `(resource_type, resource_pattern, permission)` rows.
+2. `check_user_permission(username, resource_type, resource_id)` —
+   returns the effective permission after `max_permission` folds
+   wildcard grants, specific grants, and direct grants together. Same
+   code path as the runtime check, so the answer can't drift.
+
+What is _not_ currently exposed: "enumerate every resource the user has
+any access to". That would require resource enumeration across the
+tracking, registry, and gateway stores; a future
+`POST /mlflow/auth/list-permissions` could expose it if operator demand
+emerges.
+
 ### API style: RPC
 
 All new auth endpoints follow the RPC convention already established by
