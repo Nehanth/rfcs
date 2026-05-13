@@ -143,7 +143,7 @@ UI: Users → Alice → **Edit access** → *Role assignments* section → add
 
 ## Motivation
 
-The pre-RBAC permission model has three structural problems.
+The legacy permission model has three structural problems.
 
 First, there is no abstraction for "the same permission, applied to many
 people." Every grant is a per-user-per-resource POST. Five users editing ten
@@ -236,12 +236,40 @@ feature this new.
 recognises: `experiment`, `registered_model`, `prompt`, `scorer`,
 `gateway_secret`, `gateway_endpoint`, `gateway_model_definition`, plus the
 special `workspace` slot for workspace-wide grants. The `prompt` type is
-new in this RFC; pre-RBAC, prompts reused `registered_model` endpoints,
-which made permissioning awkward (granting `(registered_model, foo, READ)`
-on a prompt-typed name purely because the wire surface was shared). The
+new in this RFC; in the legacy permission model, prompts reused
+`registered_model` endpoints, which made permissioning awkward (granting
+`(registered_model, foo, READ)` on a prompt-typed name purely because the
+wire surface was shared). The
 backfill migration rewrites existing `(registered_model, <name>, *)` rows
 to `(prompt, <name>, *)` for any name that the registry classifies as a
 prompt.
+
+**Discriminator at request time.** The OSS REST surface for prompts
+shares the registered-model route prefix (`/api/2.0/mlflow/registered-models/*`),
+so there is no prompt-only endpoint to map at the route level. The
+authorization layer dispatches by querying the **persisted entity** for
+the `mlflow.prompt.is_prompt` tag — never the inbound request body. The
+body tag is only written at create time, and trusting a body tag at
+dispatch would let a caller with `(prompt, foo, MANAGE)` spoof the
+discriminator on a non-CREATE registered-model route (`delete`,
+`update`, `set-tag`, …) and escalate into the registered-model
+namespace. Persisted-state classification closes that path. CREATE goes
+through `validate_can_create_registered_model` (workspace-level create
+rights apply to both shapes), so the after-handler — not the validator
+— is responsible for typing the granted permission on the newly created
+entity.
+
+**Migration is workspace-scoped.** A name `foo` may be a prompt in
+workspace A and a registered model in workspace B. The classifier joins
+`role_permissions` to `roles` to recover each row's workspace and
+filters `registered_model_tags` by `(workspace, name)` — only rows
+whose workspace classifies the name as a prompt flip. Wildcard rows
+(`resource_pattern = '*'`) are left untouched: they cover all RMs in
+the workspace and were never prompt-specific. When the registry tables
+aren't reachable on the auth connection (split-DB deployment), the
+migration is a documented no-op; operators run the equivalent UPDATE
+by hand. Matches the same-DB precedent of the legacy-permissions
+backfill migration.
 
 ### Per-user direct grants
 
@@ -271,7 +299,7 @@ role is a named bundle that anyone can be assigned to.
 
 ### Workspace-level grants
 
-The pre-RBAC `workspace_permissions` table held `READ` / `EDIT` / `MANAGE`
+The legacy `workspace_permissions` table held `READ` / `EDIT` / `MANAGE`
 levels with implicit fan-out to every resource type. The new model collapses
 this to a single workspace permission slot:
 `(resource_type='workspace', resource_pattern='*', permission)` where
@@ -387,7 +415,7 @@ one-resource direct grants):
 - `POST /mlflow/users/permissions/revoke`
   `{ username, resource_type, resource_id }`
 - `POST /mlflow/auth/check`
-  `{ username, resource_type, resource_id, workspace? }`
+  `{ username, resource_type, resource_id }`
   `→ { allowed: bool, permission: str }`
 
 Client methods: `grant_user_permission`, `revoke_user_permission`,
@@ -403,6 +431,15 @@ MANAGE** (same validator as the legacy endpoints), so a user with
 preserves the per-resource owner-delegation workflow without carrying
 a deprecation-warning surface.
 
+The convenience APIs explicitly reject `resource_type = 'workspace'` at
+both the handler and the store layer. Workspace-tier grants have their
+own surface (`set_workspace_permission` / `delete_workspace_permission`)
+and the `allowed` semantics on a workspace slot would be ambiguous (which
+permission tier — USE or MANAGE — counts as allowed?). The handler-level
+rejection is load-bearing because super-admins skip the
+`validate_can_manage_resource` gate via `sender_is_admin()`; the
+store-level rejection is defense in depth.
+
 `check_user_permission` mirrors Kubernetes SubjectAccessReview: it
 resolves through the same code path as the runtime authorization check
 (`_get_*_permission` family), so the answer is guaranteed consistent
@@ -410,6 +447,19 @@ with what an actual request would see. Useful for admin-UI debugging
 ("why can't Bob delete experiment 42?"), for the UI to gate elements
 before issuing the real request, and for automation that wants to
 dry-run access decisions.
+
+The `allowed` boolean tracks `permission.can_use` — i.e. the regular
+access tier, matching the `_user_can_create_in_workspace` convention.
+`READ`-only access yields `allowed = false`; `USE` / `EDIT` / `MANAGE`
+yield `allowed = true`. Callers that need a different cut (e.g. "can
+the user *delete*?") read the `permission` field directly.
+Authorization for `check_user_permission` itself is scoped to the
+resource's workspace: self-checks are always allowed; a non-admin,
+non-self requester must hold workspace MANAGE in the workspace where
+`(resource_type, resource_id)` lives. Cross-workspace probes by a
+workspace-A admin against resources in workspace B are denied; unknown
+resources also deny rather than leak a deterministic `allowed = false`
+across all workspaces. This is fail-closed by design.
 
 ### API style: RPC
 
@@ -566,8 +616,9 @@ per-resource MANAGE validator as the legacy endpoints they replace). A
 user with `(experiment, 42, MANAGE)` can still share experiment 42 with
 another user one-off. The role API itself remains admin-only — creating
 roles, assigning users, attaching grants to roles is a workspace-admin /
-super-admin action by design. The behavioural shift versus pre-RBAC is
-purely API-surface: same authority model, different method name.
+super-admin action by design. The behavioural shift versus the legacy
+permission model is purely API-surface: same authority model, different
+method name.
 
 # Open questions
 
