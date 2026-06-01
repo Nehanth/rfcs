@@ -413,11 +413,18 @@ result = mlflow.genai.evaluate(scorers=get_preset("agent"))
 # Extending a preset
 scorers = get_preset("agent") + [Guidelines(name="tone", guidelines=["Be professional"])]
 result = mlflow.genai.evaluate(scorers=scorers)
+
+# Create a custom preset and persist it
+register_preset("my_team_agent", scorers=[Safety(), Fluency(), my_custom_scorer])
+
+# Load it later
+scorers = get_preset("my_team_agent")
+result = mlflow.genai.evaluate(scorers=scorers)
 ```
 
 **Pros:** Simpler. No validation changes needed. Returns fresh instances each call. `Literal` type gives IDE autocompletion. Going from function to class later is non-breaking. Can also support persistence by registering and loading presets by name.
 
-**Cons:** No user-defined preset objects. Composition requires `+` with list concatenation. The preset concept disappears immediately -- it's just a list. No deduplication when combining presets. If this approach is preferred, the RFC can be updated to use it.
+**Cons:** No user-defined preset objects. Composition requires `+` with list concatenation. The preset concept disappears immediately -- it's just a list. No deduplication when combining presets. If this approach is preferred, the RFC can be updated to use it. This is a viable alternative if the class approach is deemed too heavy.
 
 ### 2. Tag-based filtering
 
@@ -444,5 +451,3 @@ This is an **additive, non-breaking change**. Existing code continues to work un
 
 1. **Should `ConversationalRoleAdherence` be in `ConversationalAgent`?** Currently excluded because it requires a defined persona. **Open for discussion.**
 2. **Should `Correctness` be in `Agent` or `Rag`?** Currently excluded from all presets because it requires `expectations` data. **Open for discussion.**
-3. **Deduplication key.** Should deduplication use `type(scorer)` alone, or `(type(scorer), scorer.name)`? The latter preserves multiple instances of the same class with different names (e.g., two `Guidelines` with different rules).
-4. **Class vs function for persistence.** The class-based approach is more ergonomic, while the function-based approach may be more flexible for persistence. Both support customization and persistence. The class approach is proposed as the primary design, with the function approach as a viable alternative.
