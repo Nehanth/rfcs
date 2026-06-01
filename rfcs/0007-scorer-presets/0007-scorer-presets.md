@@ -382,13 +382,7 @@ MLflow ships three built-in preset subclasses as starting points. Each call crea
 
 #### Design Rationale
 
-- **Safety is in `Rag` and `Agent`** because these presets aim to be complete starting points. Most users want safety checks without composing two presets.
-- **Fluency is excluded from `Agent`** because agent evaluation emphasizes tool usage and task completion. Users who need it can compose: `Agent() | [Fluency()]`.
-- **`ConversationalAgent` excludes `ConversationalRoleAdherence`** because it requires a defined persona in the system prompt, which not all agents have.
-- **`RetrievalSufficiency` is excluded from `Rag`** because it requires `expected_response` or `expected_facts` (ground truth). Users who have expectations data can add it manually: `Rag() | [RetrievalSufficiency()]`.
-- **`Correctness` is excluded from all presets** because it requires `expectations` (ground truth) data.
-- **`Guidelines` and `ConversationalGuidelines` are excluded from all presets** because both require a `guidelines` constructor argument.
-- **Only three built-in presets** (Rag, Agent, ConversationalAgent) — these represent clear, distinct evaluation patterns. Other groupings (e.g., safety, quality) are too vague or too small to justify a built-in preset. Users can create and persist their own groupings for their specific needs.
+- **Only three built-in presets** (Rag, Agent, ConversationalAgent) — these represent clear, distinct evaluation patterns. Users can create and persist their own groupings for specific needs.
 
 ## Drawbacks
 
@@ -400,31 +394,7 @@ MLflow ships three built-in preset subclasses as starting points. Each call crea
 
 ### 1. `get_preset()` function (no class)
 
-Instead of a `Preset` class, provide a simple function that returns a plain list. This approach is simpler and also supports persistence and customization.
-
-Usage:
-
-```python
-from mlflow.genai.scorers import get_preset
-
-# Simple usage
-result = mlflow.genai.evaluate(scorers=get_preset("agent"))
-
-# Extending a preset
-scorers = get_preset("agent") + [Guidelines(name="tone", guidelines=["Be professional"])]
-result = mlflow.genai.evaluate(scorers=scorers)
-
-# Create a custom preset and persist it
-register_preset("my_team_agent", scorers=[Safety(), Fluency(), my_custom_scorer])
-
-# Load it later
-scorers = get_preset("my_team_agent")
-result = mlflow.genai.evaluate(scorers=scorers)
-```
-
-**Pros:** Simpler. No validation changes needed. Returns fresh instances each call. `Literal` type gives IDE autocompletion. Going from function to class later is non-breaking. Can also support persistence by registering and loading presets by name.
-
-**Cons:** No user-defined preset objects. Composition requires `+` with list concatenation. The preset concept disappears immediately -- it's just a list. No deduplication when combining presets. If this approach is preferred, the RFC can be updated to use it. This is a viable alternative if the class approach is deemed too heavy.
+Instead of a `Preset` class, provide a simple function that returns a plain list. Simpler to implement and can also support persistence via `register_preset()` / `get_preset()`.
 
 ### 2. Tag-based filtering
 
