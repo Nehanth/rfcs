@@ -10,7 +10,7 @@ rfc_pr:
 
 | Author(s)              | Nehanth     |
 | ---------------------- | ----------- |
-| **Date Last Modified** | 2026-05-26  |
+| **Date Last Modified** | 2026-06-01  |
 | **AI Assistant(s)**    | Claude Code |
 
 
@@ -449,5 +449,4 @@ This is an **additive, non-breaking change**. Existing code continues to work un
 
 # Open Questions
 
-1. **Should `ConversationalRoleAdherence` be in `ConversationalAgent`?** Currently excluded because it requires a defined persona. **Open for discussion.**
-2. **Should `Correctness` be in `Agent` or `Rag`?** Currently excluded from all presets because it requires `expectations` data. **Open for discussion.**
+1. **Class-based vs function-based approach.** The class-based approach is proposed as the primary design for its ergonomics and customization support. The function-based approach is a viable alternative that may be more flexible for persistence. Both approaches were discussed during review.
