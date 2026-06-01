@@ -48,13 +48,14 @@ result = mlflow.genai.evaluate(
 ```
 
 ```python
-# Combine presets -- duplicates are resolved automatically
+# Combine presets using | -- duplicates are resolved automatically
 from mlflow.genai.scorers import Agent, SafetyPreset
 
 # Both contain Safety(); it runs once, not twice
+scorers = Agent() | SafetyPreset()
 result = mlflow.genai.evaluate(
     data=eval_dataset,
-    scorers=[Agent(), SafetyPreset()],
+    scorers=scorers,
 )
 ```
 
@@ -173,13 +174,13 @@ class Preset:
     def __len__(self):
         return len(self._scorers)
 
-    def __add__(self, other):
+    def __or__(self, other):
         if isinstance(other, (Preset, list)):
             combined = list(self) + list(other)
             return self._deduplicate(combined)
         return NotImplemented
 
-    def __radd__(self, other):
+    def __ror__(self, other):
         if isinstance(other, list):
             combined = other + list(self)
             return self._deduplicate(combined)
@@ -192,9 +193,9 @@ class Preset:
 
 **Key design decisions:**
 
-- **Immutable and deduplicated.** Scorers are stored as a tuple and exposed via a read-only property. Deduplication happens in `__init__` and `__add__` using `(type, name)` as the key, so scorers of the same class with different names are preserved (e.g., two `Guidelines` with different rules).
+- **Immutable and deduplicated.** Scorers are stored as a tuple and exposed via a read-only property. Deduplication happens in `__init__` and `__or__` using `(type, name)` as the key, so scorers of the same class with different names are preserved (e.g., two `Guidelines` with different rules).
 - **Not a `Scorer` subclass.** A preset doesn't produce feedback -- it's a container. The evaluation loop assumes one scorer = one result column. Making `Preset` a scorer would require changes throughout the pipeline (aggregation, telemetry, serialization).
-- **Iterable.** Supports `__iter__`, `__len__`, and `__add__`/`__radd__` so it composes naturally: `Agent() + [my_scorer]`, `[my_scorer] + Agent()`, or `Agent() + SafetyPreset()`.
+- **Set union via `|`.** Supports `__or__`/`__ror__` for combining presets with deduplication: `Agent() | [my_scorer]`, `[my_scorer] | Agent()`, or `Agent() | SafetyPreset()`. Uses `|` instead of `+` because the deduplication behavior matches set union semantics.
 - **Stores instances, not classes.** Users pass already-configured scorer instances.
 
 ### Built-in Presets as Subclasses
@@ -266,8 +267,8 @@ When multiple presets are combined, the same scorer type can appear more than on
 
 Deduplication happens in two places:
 
-- **In the `Preset` class** — both `__init__` and `__add__` deduplicate using `(type(scorer), scorer.name)` as the key, so the preset is always clean whenever scorers are added or combined.
-- **In `validate_scorers()`** — when multiple presets are passed directly in a list (e.g., `scorers=[Agent(), SafetyPreset()]`) without using `+`, `__add__` is never called. `validate_scorers()` flattens and deduplicates as a safety net:
+- **In the `Preset` class** — both `__init__` and `__or__` deduplicate using `(type(scorer), scorer.name)` as the key, so the preset is always clean whenever scorers are added or combined.
+- **In `validate_scorers()`** — when multiple presets are passed directly in a list (e.g., `scorers=[Agent(), SafetyPreset()]`) without using `|`, `__or__` is never called. `validate_scorers()` flattens and deduplicates as a safety net:
 
 ```python
 def validate_scorers(scorers: list[Any]) -> list[Scorer]:
@@ -308,10 +309,10 @@ MLflow ships five built-in preset subclasses. Each call creates fresh scorer ins
 #### Design Rationale
 
 - **Safety is in `Rag` and `Agent`** because these presets aim to be complete starting points. Most users want safety checks without composing two presets.
-- **Fluency is excluded from `Agent`** because agent evaluation emphasizes tool usage and task completion. Users who need it can compose: `Agent() + [Fluency()]`.
+- **Fluency is excluded from `Agent`** because agent evaluation emphasizes tool usage and task completion. Users who need it can compose: `Agent() | [Fluency()]`.
 - **`ConversationalAgent` excludes `ConversationalRoleAdherence`** because it requires a defined persona in the system prompt, which not all agents have.
-- **`RetrievalSufficiency` is excluded from `Rag`** because it requires `expected_response` or `expected_facts` (ground truth). Users who have expectations data can add it manually: `Rag() + [RetrievalSufficiency()]`.
-- **`Correctness` is excluded from all presets** because it requires `expectations` (ground truth) data. Users who have ground truth can add it manually: `Quality() + [Correctness()]`.
+- **`RetrievalSufficiency` is excluded from `Rag`** because it requires `expected_response` or `expected_facts` (ground truth). Users who have expectations data can add it manually: `Rag() | [RetrievalSufficiency()]`.
+- **`Correctness` is excluded from all presets** because it requires `expectations` (ground truth) data. Users who have ground truth can add it manually: `Quality() | [Correctness()]`.
 - **`Guidelines` and `ConversationalGuidelines` are excluded from all presets** because both require a `guidelines` constructor argument.
 
 ## Drawbacks
