@@ -10,7 +10,7 @@ rfc_pr:
 
 | Author(s)              | Nehanth     |
 | ---------------------- | ----------- |
-| **Date Last Modified** | 2026-06-01  |
+| **Date Last Modified** | 2026-06-16  |
 | **AI Assistant(s)**    | Claude Code |
 
 
@@ -137,128 +137,30 @@ A `Preset` is a named, iterable container of scorers. It is **not** a `Scorer` s
 
 ```python
 class Preset:
-    """A named, immutable collection of scorers for a common evaluation pattern.
-
-    Presets can be passed in the ``scorers`` list alongside individual
-    scorers. They are flattened during validation, so the evaluation
-    loop only ever sees individual ``Scorer`` instances.
-
-    Args:
-        name: A descriptive name for this preset.
-        scorers: The list of scorer instances in this preset.
-    """
-
-    def __init__(self, name: str, scorers: list[Scorer]):
-        self._name = name
-        self._validate_no_duplicates(scorers)
-        self._scorers = tuple(scorers)
-
-    @staticmethod
-    def _validate_no_duplicates(scorers):
-        seen = set()
-        for scorer in scorers:
-            key = (type(scorer), scorer.name)
-            if key in seen:
-                raise MlflowException.invalid_parameter_value(
-                    f"Duplicate scorer: {type(scorer).__name__} with name '{scorer.name}'. "
-                    "Use different names for scorers of the same type."
-                )
-            seen.add(key)
-
-    @staticmethod
-    def _deduplicate(scorers):
-        seen = set()
-        result = []
-        for scorer in scorers:
-            key = (type(scorer), scorer.name)
-            if key not in seen:
-                seen.add(key)
-                result.append(scorer)
-        return result
-
+    def __init__(self, name: str, scorers: list[Scorer]): ...
+    def __or__(self, other) -> "Preset": ...   # set union with deduplication
+    def __ror__(self, other) -> "Preset": ...
+    def register(self, *, experiment_id: str | None = None): ...
     @property
-    def name(self) -> str:
-        return self._name
-
+    def name(self) -> str: ...
     @property
-    def scorers(self) -> tuple:
-        return self._scorers
-
-    def __iter__(self):
-        return iter(self._scorers)
-
-    def __len__(self):
-        return len(self._scorers)
-
-    def __or__(self, other):
-        if isinstance(other, (Preset, list)):
-            combined = list(self) + list(other)
-            return self._deduplicate(combined)
-        return NotImplemented
-
-    def __ror__(self, other):
-        if isinstance(other, list):
-            combined = other + list(self)
-            return self._deduplicate(combined)
-        return NotImplemented
-
-    def register(self, *, experiment_id: str | None = None):
-        """Register this preset to the MLflow server for team sharing."""
-        ...
-
-    def __repr__(self):
-        scorer_names = [type(s).__name__ for s in self._scorers]
-        return f"Preset('{self._name}', [{', '.join(scorer_names)}])"
+    def scorers(self) -> tuple: ...
+    def __iter__(self): ...
+    def __len__(self): ...
+    def __repr__(self): ...
 ```
 
 **Key design decisions:**
 
 - **Immutable.** Scorers are stored as a tuple and exposed via a read-only property.
 - **Blocks duplicates on construction.** `__init__` raises an error if duplicate scorers (same type and name) are passed. This is explicit — users know immediately if they have a conflict, rather than duplicates being silently removed.
-- **Set union via `|`.** Supports `__or__`/`__ror__` for combining presets with deduplication: `Agent() | [my_scorer]` or `Agent() | Rag()`. Uses `|` instead of `+` because the deduplication behavior matches set union semantics. Deduplication on `|` is silent because combining presets with overlapping scorers is expected usage.
+- **Set union via `|`.** Combines presets with deduplication and returns a new `Preset`: `Agent() | [my_scorer]` or `Agent() | Rag()`. Results can be chained and registered. Uses `|` instead of `+` because the deduplication behavior matches set union semantics.
 - **Not a `Scorer` subclass.** A preset doesn't produce feedback -- it's a container. The evaluation loop assumes one scorer = one result column. Making `Preset` a scorer would require changes throughout the pipeline (aggregation, telemetry, serialization).
 - **Stores instances, not classes.** Users pass already-configured scorer instances.
 
 ### Built-in Presets as Subclasses
 
-Each built-in preset is a subclass of `Preset` that hardcodes its scorer list. This means each call creates **fresh scorer instances** (no shared mutable singletons) and supports preset-specific customization.
-
-```python
-class Agent(Preset):
-    def __init__(self):
-        super().__init__("agent", [
-            ToolCallCorrectness(),
-            ToolCallEfficiency(),
-            RelevanceToQuery(),
-            Safety(),
-            Completeness(),
-        ])
-
-class Rag(Preset):
-    def __init__(self):
-        super().__init__("rag", [
-            RetrievalRelevance(),
-            RetrievalGroundedness(),
-            RelevanceToQuery(),
-            Safety(),
-            Completeness(),
-        ])
-
-class ConversationalAgent(Preset):
-    def __init__(self):
-        super().__init__("conversational-agent", [
-            ToolCallCorrectness(),
-            ToolCallEfficiency(),
-            RelevanceToQuery(),
-            Safety(),
-            Completeness(),
-            UserFrustration(),
-            ConversationCompleteness(),
-            ConversationalSafety(),
-            ConversationalToolCallEfficiency(),
-            KnowledgeRetention(),
-        ])
-```
+Each built-in preset is a subclass of `Preset` that hardcodes its scorer list. Each call creates **fresh scorer instances** (no shared mutable singletons) and supports preset-specific customization. See the Built-in Preset Summary table below for the scorers in each preset.
 
 **Why subclasses over instances:**
 
@@ -285,16 +187,6 @@ my_preset = Preset("my_eval", scorers=[
     Safety(),
     my_custom_scorer,
 ])
-```
-
-**Subclass a built-in preset to add defaults:**
-
-```python
-class MyAgent(Agent):
-    def __init__(self):
-        super().__init__()
-        # Add team-specific scorers
-        self._scorers = self._scorers + (Fluency(), my_compliance_scorer)
 ```
 
 ### Persistence
@@ -337,6 +229,12 @@ result = mlflow.genai.evaluate(data=eval_dataset, scorers=[preset])
 - **Team sharing.** A persisted preset is available to any team member with access to the experiment.
 - **Customization without code.** Teams can customize and persist presets without modifying source code or templates.
 
+**Persistence behavior:**
+
+- **Scope.** Presets are scoped to experiments, consistent with how scorer registration already works in MLflow. This prevents name collisions across teams and ensures presets are organized alongside the experiments they evaluate. If no `experiment_id` is provided, the active experiment is used.
+- **Custom scorer portability.** If a preset contains custom scorers, those scorers must be registered first. When a teammate loads the preset, the custom scorers are resolved from the registry. If a custom scorer is not registered, `preset.register()` will raise an error.
+- **Discovery.** `list_presets()` returns all registered presets for the current experiment, allowing teams to discover what presets are available. This follows the same pattern as `list_scorers()`.
+
 ### Deduplication
 
 When presets are combined using `|`, the same scorer type can appear more than once. For example, `Agent()` and `Rag()` both contain `Safety()` and `RelevanceToQuery()`. Running the same scorer twice wastes LLM API calls and produces duplicate result columns.
@@ -344,26 +242,7 @@ When presets are combined using `|`, the same scorer type can appear more than o
 Deduplication happens in two places:
 
 - **In `__or__`** — when presets are combined using `|`, duplicates are removed using `(type(scorer), scorer.name)` as the key. This is expected behavior when combining presets with overlapping scorers.
-- **In `validate_scorers()`** — when multiple presets are passed directly in a list (e.g., `scorers=[Agent(), Rag()]`) without using `|`, `__or__` is never called. `validate_scorers()` flattens and deduplicates as a safety net:
-
-```python
-def validate_scorers(scorers: list[Any]) -> list[Scorer]:
-    from mlflow.genai.scorers.presets import Preset
-
-    # 1. Flatten presets into individual scorers
-    flat = []
-    for item in scorers:
-        if isinstance(item, Preset):
-            flat.extend(item)
-        else:
-            flat.append(item)
-
-    # 2. Deduplicate by (type, name)
-    flat = Preset._deduplicate(flat)
-
-    # 3. Existing validation on the flattened list
-    ...
-```
+- **In `validate_scorers()`** — when multiple presets are passed directly in a list (e.g., `scorers=[Agent(), Rag()]`) without using `|`, `__or__` is never called. `validate_scorers()` flattens presets into individual scorers and deduplicates as a safety net.
 
 Scorers of the same class with different names are preserved (e.g., two `Guidelines` with different rules). Only true duplicates — same class and same name — are removed.
 
