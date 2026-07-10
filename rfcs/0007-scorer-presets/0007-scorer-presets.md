@@ -20,7 +20,7 @@ rfc_pr:
 
 MLflow provides 21 built-in scorers for evaluating GenAI outputs, but users have no way to select a coherent subset for a specific evaluation pattern. Today, evaluating an agent requires importing and instantiating 9+ individual scorer classes -- boilerplate that gets copy-pasted across teams and templates.
 
-This RFC proposes a `Preset` class that packages a named collection of scorers with support for **customization** and **persistence**. MLflow ships three built-in preset subclasses (`Rag`, `Agent`, `ConversationalAgent`) as starting points. Users can create custom presets, persist them to the MLflow server, and share them across teams and sessions. Presets can be passed directly in the `scorers` list alongside individual scorers, with automatic deduplication when presets overlap.
+This RFC proposes a `Preset` class that packages a named collection of scorers with support for **customization** and **persistence**. MLflow ships three built-in preset subclasses (`Rag`, `Agent`, `ConversationalAgent`) as starting points. Users can create custom presets, persist them to the MLflow server, and share them across teams and sessions. Presets can be passed directly in the `scorers` list alongside individual scorers.
 
 # Basic Example
 
@@ -44,18 +44,6 @@ result = mlflow.genai.evaluate(
     data=eval_dataset,
     predict_fn=predict_fn,
     scorers=[Agent(), Guidelines(name="tone", guidelines=["Respond professionally"])],
-)
-```
-
-```python
-# Combine presets using | -- duplicates are resolved automatically
-from mlflow.genai.scorers import Agent, Rag
-
-# Overlapping scorers (e.g. Safety, RelevanceToQuery) run once, not twice
-scorers = Agent() | Rag()
-result = mlflow.genai.evaluate(
-    data=eval_dataset,
-    scorers=scorers,
 )
 ```
 
@@ -138,8 +126,6 @@ A `Preset` is a named, iterable container of scorers. It is **not** a `Scorer` s
 ```python
 class Preset:
     def __init__(self, name: str, scorers: list[Scorer]): ...
-    def __or__(self, other) -> "Preset": ...   # set union with deduplication
-    def __ror__(self, other) -> "Preset": ...
     def register(self, *, experiment_id: str | None = None): ...
     @property
     def name(self) -> str: ...
@@ -153,9 +139,8 @@ class Preset:
 **Key design decisions:**
 
 - **Immutable.** Scorers are stored as a tuple and exposed via a read-only property.
-- **Blocks duplicates on construction.** `__init__` raises an error if duplicate scorers (same type and name) are passed. This is explicit — users know immediately if they have a conflict, rather than duplicates being silently removed.
-- **Set union via `|`.** Combines presets with deduplication and returns a new `Preset`: `Agent() | [my_scorer]` or `Agent() | Rag()`. Results can be chained and registered. Uses `|` instead of `+` because the deduplication behavior matches set union semantics.
-- **Not a `Scorer` subclass.** A preset doesn't produce feedback -- it's a container. The evaluation loop assumes one scorer = one result column. Making `Preset` a scorer would require changes throughout the pipeline (aggregation, telemetry, serialization).
+- **Blocks duplicates on construction.** `__init__` raises an error if duplicate scorers (same type and name) are passed. Users who need two scorers of the same type should give them different names.
+- **Not a `Scorer` subclass.** A preset doesn't produce feedback -- it's a container. The evaluation loop assumes one scorer = one result column.
 - **Stores instances, not classes.** Users pass already-configured scorer instances.
 
 ### Built-in Presets as Subclasses
@@ -171,20 +156,14 @@ Each built-in preset is a subclass of `Preset` that hardcodes its scorer list. E
 
 ### Customization
 
-Users can customize presets in several ways:
-
-**Combine with additional scorers using `|`:**
-
-```python
-scorers = Agent() | [Fluency(), Guidelines(name="tone", guidelines=["Be professional"])]
-```
-
-**Create a custom preset from scratch:**
+Users can create custom presets with any combination of scorers:
 
 ```python
 my_preset = Preset("my_eval", scorers=[
     ToolCallCorrectness(),
     Safety(),
+    Fluency(),
+    Guidelines(name="tone", guidelines=["Be professional"]),
     my_custom_scorer,
 ])
 ```
@@ -209,17 +188,29 @@ my_preset.register()
 my_preset.register(experiment_id="123")
 ```
 
-**Load a persisted preset:**
+**Preset CRUD API:**
 
 ```python
-from mlflow.genai.scorers import get_preset
+from mlflow.genai.scorers import get_preset, list_presets, delete_preset
 
-# Load from the active experiment
+# Load a preset
 preset = get_preset(name="my_team_agent")
+preset = get_preset(name="my_team_agent", version=2)
 
-# Load from a specific experiment
-preset = get_preset(name="my_team_agent", experiment_id="123")
+# List all presets in the current experiment
+presets = list_presets()
 
+# Update a preset (registers a new version)
+updated = Preset("my_team_agent", scorers=[Safety(), Fluency(), Completeness()])
+updated.register()
+
+# Delete a preset
+delete_preset(name="my_team_agent")
+
+# Copy to another experiment
+copy_preset(name="my_team_agent", from_experiment_id="123", to_experiment_id="456")
+
+# Use in evaluation
 result = mlflow.genai.evaluate(data=eval_dataset, scorers=[preset])
 ```
 
@@ -234,19 +225,9 @@ result = mlflow.genai.evaluate(data=eval_dataset, scorers=[preset])
 - **Scope.** Presets are scoped to experiments, consistent with how scorer registration already works in MLflow. This prevents name collisions across teams and ensures presets are organized alongside the experiments they evaluate. If no `experiment_id` is provided, the active experiment is used.
 - **Custom scorer portability.** If a preset contains custom scorers, those scorers must be registered first. When a teammate loads the preset, the custom scorers are resolved from the registry. If a custom scorer is not registered, `preset.register()` will raise an error.
 - **Discovery.** `list_presets()` returns all registered presets for the current experiment, allowing teams to discover what presets are available. This follows the same pattern as `list_scorers()`.
-
-### Deduplication
-
-When presets are combined using `|`, the same scorer type can appear more than once. For example, `Agent()` and `Rag()` both contain `Safety()` and `RelevanceToQuery()`. Running the same scorer twice wastes LLM API calls and produces duplicate result columns.
-
-Deduplication happens in two places:
-
-- **In `__or__`** — when presets are combined using `|`, duplicates are removed using `(type(scorer), scorer.name)` as the key. This is expected behavior when combining presets with overlapping scorers.
-- **In `validate_scorers()`** — when multiple presets are passed directly in a list (e.g., `scorers=[Agent(), Rag()]`) without using `|`, `__or__` is never called. `validate_scorers()` flattens presets into individual scorers and deduplicates as a safety net.
-
-Scorers of the same class with different names are preserved (e.g., two `Guidelines` with different rules). Only true duplicates — same class and same name — are removed.
-
-`evaluate()` itself does not change. By the time scorers reach the evaluation loop, they are all individual `Scorer` instances.
+- **Copying across experiments.** Since experiments typically map to a single agent, users should be able to copy a preset from one experiment to another via `copy_preset(name, from_experiment_id, to_experiment_id)`.
+- **Versioning.** Presets support versioning, consistent with how scorer registration already works in MLflow. When a preset is updated, a new version is created. Users can load a specific version via `get_preset(name, version=N)` or default to the latest.
+- **Return type.** `get_preset()` returns a `Preset` object with server-side metadata attached (experiment ID, version, created timestamp). The preset is fully functional — it can be iterated and passed to `evaluate()` like any other preset.
 
 ### Built-in Preset Summary
 
@@ -266,7 +247,7 @@ MLflow ships three built-in preset subclasses as starting points. Each call crea
 ## Drawbacks
 
 1. **New class in the API.** Adds `Preset` to the public surface. Mitigation: it's a simple container with persistence support.
-2. **Opinionated defaults.** Not everyone will agree on which scorers belong in which preset. Mitigation: presets are extensible via `|`, and users can create and persist their own.
+2. **Opinionated defaults.** Not everyone will agree on which scorers belong in which preset. Mitigation: users can create and persist their own custom presets.
 3. **Persistence adds scope.** Supporting preset registration and retrieval increases implementation complexity. Mitigation: leverages the existing scorer registration infrastructure.
 
 # Alternatives
