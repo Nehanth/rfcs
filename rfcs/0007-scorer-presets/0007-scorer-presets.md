@@ -60,7 +60,7 @@ my_preset.register()
 from mlflow.genai.scorers import get_scorer_preset
 
 preset = get_scorer_preset(name="my_team_eval")
-result = mlflow.genai.evaluate(data=eval_dataset, scorers=list(preset.scorers))
+result = mlflow.genai.evaluate(data=eval_dataset, scorers=preset.scorers)
 ```
 
 ## Motivation
@@ -131,7 +131,7 @@ class Preset:
     @property
     def name(self) -> str: ...
     @property
-    def scorers(self) -> tuple: ...
+    def scorers(self) -> list[Scorer]: ...
     def __iter__(self): ...
     def __len__(self): ...
     def __repr__(self): ...
@@ -139,7 +139,7 @@ class Preset:
 
 **Key design decisions:**
 
-- **Immutable.** Scorers are stored as a tuple and exposed via a read-only property.
+- **Immutable.** Scorers are stored internally and the `scorers` property returns a fresh copy each time, so mutations don't affect the preset.
 - **Blocks duplicates on construction.** `__init__` raises an error if duplicate scorers (same type and name) are passed. Users who need two scorers of the same type should give them different names.
 - **Not a `Scorer` subclass.** A preset doesn't produce feedback -- it's a container. The evaluation loop assumes one scorer = one result column.
 - **Stores instances, not classes.** Users pass already-configured scorer instances.
@@ -212,7 +212,7 @@ delete_scorer_preset(name="my_team_agent")
 preset.copy(to_experiment_id="456")
 
 # Use in evaluation
-result = mlflow.genai.evaluate(data=eval_dataset, scorers=list(preset.scorers))
+result = mlflow.genai.evaluate(data=eval_dataset, scorers=preset.scorers)
 ```
 
 **Why persistence matters:**
