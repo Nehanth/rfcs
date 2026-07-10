@@ -57,10 +57,10 @@ my_preset = Preset("my_team_eval", scorers=[Safety(), Fluency(), my_custom_score
 my_preset.register()
 
 # Later, another team member loads it
-from mlflow.genai.scorers import get_preset
+from mlflow.genai.scorers import get_scorer_preset
 
-preset = get_preset(name="my_team_eval")
-result = mlflow.genai.evaluate(data=eval_dataset, scorers=[preset])
+preset = get_scorer_preset(name="my_team_eval")
+result = mlflow.genai.evaluate(data=eval_dataset, scorers=list(preset.scorers))
 ```
 
 ## Motivation
@@ -127,6 +127,7 @@ A `Preset` is a named, iterable container of scorers. It is **not** a `Scorer` s
 class Preset:
     def __init__(self, name: str, scorers: list[Scorer]): ...
     def register(self, *, experiment_id: str | None = None): ...
+    def copy(self, *, to_experiment_id: str): ...
     @property
     def name(self) -> str: ...
     @property
@@ -191,27 +192,27 @@ my_preset.register(experiment_id="123")
 **Preset CRUD API:**
 
 ```python
-from mlflow.genai.scorers import get_preset, list_presets, delete_preset
+from mlflow.genai.scorers import get_scorer_preset, list_scorer_presets, delete_scorer_preset
 
 # Load a preset
-preset = get_preset(name="my_team_agent")
-preset = get_preset(name="my_team_agent", version=2)
+preset = get_scorer_preset(name="my_team_agent")
+preset = get_scorer_preset(name="my_team_agent", version=2)
 
 # List all presets in the current experiment
-presets = list_presets()
+presets = list_scorer_presets()
 
 # Update a preset (registers a new version)
 updated = Preset("my_team_agent", scorers=[Safety(), Fluency(), Completeness()])
 updated.register()
 
 # Delete a preset
-delete_preset(name="my_team_agent")
+delete_scorer_preset(name="my_team_agent")
 
 # Copy to another experiment
-copy_preset(name="my_team_agent", from_experiment_id="123", to_experiment_id="456")
+preset.copy(to_experiment_id="456")
 
 # Use in evaluation
-result = mlflow.genai.evaluate(data=eval_dataset, scorers=[preset])
+result = mlflow.genai.evaluate(data=eval_dataset, scorers=list(preset.scorers))
 ```
 
 **Why persistence matters:**
@@ -224,10 +225,10 @@ result = mlflow.genai.evaluate(data=eval_dataset, scorers=[preset])
 
 - **Scope.** Presets are scoped to experiments, consistent with how scorer registration already works in MLflow. This prevents name collisions across teams and ensures presets are organized alongside the experiments they evaluate. If no `experiment_id` is provided, the active experiment is used.
 - **Custom scorer portability.** If a preset contains custom scorers, those scorers must be registered first. When a teammate loads the preset, the custom scorers are resolved from the registry. If a custom scorer is not registered, `preset.register()` will raise an error.
-- **Discovery.** `list_presets()` returns all registered presets for the current experiment, allowing teams to discover what presets are available. This follows the same pattern as `list_scorers()`.
-- **Copying across experiments.** Since experiments typically map to a single agent, users should be able to copy a preset from one experiment to another via `copy_preset(name, from_experiment_id, to_experiment_id)`.
-- **Versioning.** Presets support versioning, consistent with how scorer registration already works in MLflow. When a preset is updated, a new version is created. Users can load a specific version via `get_preset(name, version=N)` or default to the latest.
-- **Return type.** `get_preset()` returns a `Preset` object with server-side metadata attached (experiment ID, version, created timestamp). The preset is fully functional — it can be iterated and passed to `evaluate()` like any other preset.
+- **Discovery.** `list_scorer_presets()` returns all registered presets for the current experiment, allowing teams to discover what presets are available. This follows the same pattern as `list_scorers()`.
+- **Copying across experiments.** Since experiments typically map to a single agent, users should be able to copy a preset to another experiment via `preset.copy(to_experiment_id)`.
+- **Versioning.** Presets support versioning, consistent with how scorer registration already works in MLflow. When a preset is updated, a new version is created. Users can load a specific version via `get_scorer_preset(name, version=N)` or default to the latest.
+- **Return type.** `get_scorer_preset()` returns a `Preset` object with server-side metadata attached (experiment ID, version, created timestamp). The preset is fully functional — it can be iterated and passed to `evaluate()` like any other preset.
 
 ### Built-in Preset Summary
 
@@ -252,9 +253,9 @@ MLflow ships three built-in preset subclasses as starting points. Each call crea
 
 # Alternatives
 
-### 1. `get_preset()` function (no class)
+### 1. `get_scorer_preset()` function (no class)
 
-Instead of a `Preset` class, provide a simple function that returns a plain list. Simpler to implement and can also support persistence via `register_preset()` / `get_preset()`.
+Instead of a `Preset` class, provide a simple function that returns a plain list. Simpler to implement and can also support persistence via `register_preset()` / `get_scorer_preset()`.
 
 ### 2. Tag-based filtering
 
