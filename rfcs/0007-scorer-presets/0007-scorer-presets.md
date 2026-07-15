@@ -230,6 +230,35 @@ result = mlflow.genai.evaluate(data=eval_dataset, scorers=preset.scorers)
 - **Versioning.** Presets support versioning, consistent with how scorer registration already works in MLflow. When a preset is updated, a new version is created. Users can load a specific version via `get_scorer_preset(name, version=N)` or default to the latest.
 - **Return type.** `get_scorer_preset()` returns a `Preset` object with server-side metadata attached (experiment ID, version, created timestamp). The preset is fully functional — it can be iterated and passed to `evaluate()` like any other preset.
 
+**Serialization schema:**
+
+Inspired by the existing `SerializedScorer` format that MLflow already uses for individual scorer registration, presets are serialized as a named list of scorers:
+
+```json
+{
+  "preset_name": "my_team_agent",
+  "version": 1,
+  "mlflow_version": "3.12.0",
+  "scorers": [
+    {
+      "name": "tool_call_correctness",
+      "mlflow_version": "3.12.0",
+      "serialization_version": 1,
+      "builtin_scorer_class": "ToolCallCorrectness",
+      "builtin_scorer_pydantic_data": {"name": "tool_call_correctness", "model": null}
+    },
+    {
+      "name": "my_length_check",
+      "mlflow_version": "3.12.0",
+      "serialization_version": 1,
+      "call_source": "def my_length_check(outputs) -> bool:\n    return len(outputs) > 100",
+      "call_signature": "(outputs) -> bool",
+      "original_func_name": "my_length_check"
+    }
+  ]
+}
+```
+
 ### Built-in Preset Summary
 
 MLflow ships three built-in preset subclasses as starting points. Each call creates fresh scorer instances. Users can customize and persist their own presets.
