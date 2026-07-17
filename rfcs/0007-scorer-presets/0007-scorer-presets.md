@@ -230,6 +230,18 @@ result = mlflow.genai.evaluate(data=eval_dataset, scorers=preset.scorers)
 - **Versioning.** Presets support versioning, consistent with how scorer registration already works in MLflow. When a preset is updated, a new version is created. Users can load a specific version via `get_scorer_preset(name, version=N)` or default to the latest.
 - **Return type.** `get_scorer_preset()` returns a `Preset` object with server-side metadata attached (experiment ID, version, created timestamp). The preset is fully functional — it can be iterated and passed to `evaluate()` like any other preset.
 
+**REST API Endpoints:**
+
+Following the existing scorer registration API pattern:
+
+| Method | Endpoint | Request | Response |
+|--------|----------|---------|----------|
+| `POST` | `/mlflow/scorer-presets/register` | experiment_id, preset_name, serialized_preset | version, preset_id |
+| `GET` | `/mlflow/scorer-presets/get` | experiment_id, preset_name, version? | preset |
+| `GET` | `/mlflow/scorer-presets/list` | experiment_id | presets[] |
+| `DELETE` | `/mlflow/scorer-presets/delete` | experiment_id, preset_name, version? | — |
+| `POST` | `/mlflow/scorer-presets/copy` | experiment_id, preset_name, to_experiment_id | — |
+
 **Serialization schema:**
 
 Inspired by the existing `SerializedScorer` format that MLflow already uses for individual scorer registration, presets are serialized as a named list of scorers:
