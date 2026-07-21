@@ -286,6 +286,46 @@ MLflow ships three built-in preset subclasses as starting points. Each call crea
 
 - **Only three built-in presets** (Rag, Agent, ConversationalAgent) — these represent clear, distinct evaluation patterns. Users can create and persist their own groupings for specific needs.
 
+### UI Surface
+
+Presets are managed within the existing **Judges tab** in the experiment page.
+
+**"New preset" button:**
+
+A new "New preset" button is added next to the existing "New LLM judge" split button in the top-right header.
+
+**New preset view:**
+
+Clicking "New preset" opens a view with two paths:
+
+- **Quickstart** — three built-in preset cards (Rag, Agent, ConversationalAgent). Each card shows the preset name, use case description, and the scorers it includes. Clicking a quickstart card registers it to the experiment immediately with the default scorers and returns to the Judges tab.
+
+- **Create custom preset** — opens a creation form (following the same two-panel layout as the "Create LLM judge" modal):
+  - **Left panel:**
+    - Name field (required, cannot be changed after creation)
+    - Searchable scorer list with checkboxes, grouped by type (built-in LLM judges, session-level judges, registered custom judges). Each row shows the scorer name and a short description.
+  - **Right panel:**
+    - Live preview of selected scorers, updating as the user checks/unchecks. Shows a count of selected scorers at the top.
+  - **Footer:**
+    - "Cancel" and "Create preset" buttons.
+
+**Preset cards in the Judges tab:**
+
+Registered presets (quickstart or custom) appear as cards in the Judges tab alongside individual judge cards. Each preset card shows:
+
+- Preset name, scorer count, and version badge
+- Collapsed view showing scorer names as tags
+- Expandable view showing each scorer with its type and description
+- Overflow menu with edit and delete actions
+
+**Edit preset:**
+
+Clicking edit opens the same creation form, pre-populated with the current scorers. The name field is read-only. Saving creates a new version.
+
+**Delete preset:**
+
+Clicking delete opens a confirmation dialog. Deleting removes all versions of the preset.
+
 ## Drawbacks
 
 1. **New class in the API.** Adds `Preset` to the public surface. Mitigation: it's a simple container with persistence support.
