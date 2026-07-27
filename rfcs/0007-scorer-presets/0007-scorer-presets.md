@@ -236,11 +236,14 @@ Following the existing scorer registration API pattern:
 
 | Method | Endpoint | Request | Response |
 |--------|----------|---------|----------|
-| `POST` | `/mlflow/scorer-presets/register` | experiment_id, preset_name, serialized_preset | version, preset_id |
-| `GET` | `/mlflow/scorer-presets/get` | experiment_id, preset_name, version? | preset |
+| `POST` | `/mlflow/scorer-presets/register` | experiment_id, name, serialized_preset | version, preset_id |
+| `GET` | `/mlflow/scorer-presets/get` | experiment_id, name, version? | preset |
 | `GET` | `/mlflow/scorer-presets/list` | experiment_id | presets[] |
-| `DELETE` | `/mlflow/scorer-presets/delete` | experiment_id, preset_name, version? | — |
-| `POST` | `/mlflow/scorer-presets/copy` | experiment_id, preset_name, to_experiment_id | — |
+| `GET` | `/mlflow/scorer-presets/versions` | experiment_id, name | presets[] |
+| `DELETE` | `/mlflow/scorer-presets/delete` | experiment_id, name, version? | — |
+| `POST` | `/mlflow/scorer-presets/copy` | experiment_id, name, to_experiment_id, version? | — |
+
+List operations (`list`, `versions`) support pagination via `page_token` and `max_results` parameters. Deleting without a version removes all versions of the preset.
 
 **Serialization schema:**
 
@@ -248,9 +251,8 @@ Inspired by the existing `SerializedScorer` format that MLflow already uses for 
 
 ```json
 {
-  "preset_name": "my_team_agent",
+  "name": "my_team_agent",
   "version": 1,
-  "mlflow_version": "3.12.0",
   "scorers": [
     {
       "name": "tool_call_correctness",
