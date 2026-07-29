@@ -236,7 +236,7 @@ Following the existing scorer registration API pattern:
 
 | Method | Endpoint | Request | Response |
 |--------|----------|---------|----------|
-| `POST` | `/mlflow/scorer-presets/register` | experiment_id, name, serialized_preset | version, preset_id |
+| `POST` | `/mlflow/scorer-presets/register` | experiment_id, name, scorer_ids | version, preset_id |
 | `GET` | `/mlflow/scorer-presets/get` | experiment_id, name, version? | preset |
 | `GET` | `/mlflow/scorer-presets/list` | experiment_id | presets[] |
 | `GET` | `/mlflow/scorer-presets/versions` | experiment_id, name | presets[] |
@@ -247,29 +247,13 @@ List operations (`list`, `versions`) support pagination via `page_token` and `ma
 
 **Serialization schema:**
 
-Inspired by the existing `SerializedScorer` format that MLflow already uses for individual scorer registration, presets are serialized as a named list of scorers:
+Presets store references to registered scorers by ID. When `preset.register()` is called, the Python API automatically registers each scorer individually and stores the scorer IDs in the preset.
 
 ```json
 {
   "name": "my_team_agent",
   "version": 1,
-  "scorers": [
-    {
-      "name": "tool_call_correctness",
-      "mlflow_version": "3.12.0",
-      "serialization_version": 1,
-      "builtin_scorer_class": "ToolCallCorrectness",
-      "builtin_scorer_pydantic_data": {"name": "tool_call_correctness", "model": null}
-    },
-    {
-      "name": "my_length_check",
-      "mlflow_version": "3.12.0",
-      "serialization_version": 1,
-      "call_source": "def my_length_check(outputs) -> bool:\n    return len(outputs) > 100",
-      "call_signature": "(outputs) -> bool",
-      "original_func_name": "my_length_check"
-    }
-  ]
+  "scorer_ids": ["scorer_abc123", "scorer_def456", "scorer_ghi789"]
 }
 ```
 
