@@ -247,7 +247,7 @@ List operations (`list`, `versions`) support pagination via `page_token` and `ma
 
 **Serialization schema:**
 
-Presets store references to registered scorers by ID. When `preset.register()` is called, the Python API automatically registers each scorer individually and stores the scorer IDs in the preset.
+Presets store references to registered scorers by ID. When `preset.register()` is called, the Python API automatically registers each scorer. If a scorer is already registered in the experiment, it uses the existing scorer ID instead of creating a duplicate.
 
 ```json
 {
