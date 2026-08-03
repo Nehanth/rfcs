@@ -10,7 +10,7 @@ rfc_pr:
 
 | Author(s)              | Nehanth     |
 | ---------------------- | ----------- |
-| **Date Last Modified** | 2026-06-16  |
+| **Date Last Modified** | 2026-08-03  |
 | **AI Assistant(s)**    | Claude Code |
 
 
@@ -227,7 +227,13 @@ result = mlflow.genai.evaluate(data=eval_dataset, scorers=preset.scorers)
 - **Custom scorer portability.** If a preset contains custom scorers, those scorers must be registered first. When a teammate loads the preset, the custom scorers are resolved from the registry. If a custom scorer is not registered, `preset.register()` will raise an error.
 - **Discovery.** `list_scorer_presets()` returns all registered presets for the current experiment, allowing teams to discover what presets are available. This follows the same pattern as `list_scorers()`.
 - **Copying across experiments.** Since experiments typically map to a single agent, users should be able to copy a preset to another experiment via `preset.copy(to_experiment_id)`.
-- **Versioning.** Presets support versioning, consistent with how scorer registration already works in MLflow. When a preset is updated, a new version is created. Users can load a specific version via `get_scorer_preset(name, version=N)` or default to the latest.
+- **Versioning.** A preset version is an immutable snapshot of `(scorer_id, scorer_version)` pairs. A new preset version is created in two ways:
+  - **Manual** — the user re-registers the preset with a different scorer list (adding, removing, or swapping scorers).
+  - **Automatic** — when a member scorer gets a new version, MLflow detects that the scorer belongs to one or more presets and auto-creates a new version of each, snapshotting the updated scorer version. Users never maintain preset versions by hand.
+
+  Users load the latest version by default, or pin a specific version via `get_scorer_preset(name, version=N)` for deterministic, reproducible evaluation.
+- **Visibility of auto-created versions.** When registering a new scorer version triggers preset version bumps, the registration response and logs surface which presets were updated, so the side effect is never silent.
+- **Telemetry.** Using MLflow's existing telemetry system, preset load calls record whether a specific version was explicitly requested or defaulted to latest. This validates how often users rely on deterministic pinning versus latest.
 - **Return type.** `get_scorer_preset()` returns a `Preset` object with server-side metadata attached (experiment ID, version, created timestamp). The preset is fully functional — it can be iterated and passed to `evaluate()` like any other preset.
 
 **REST API Endpoints:**
@@ -247,13 +253,19 @@ List operations (`list`, `versions`) support pagination via `page_token` and `ma
 
 **Serialization schema:**
 
-Presets store references to registered scorers by ID. When `preset.register()` is called, the Python API automatically registers each scorer. If a scorer is already registered in the experiment, it uses the existing scorer ID instead of creating a duplicate.
+Presets store references to registered scorers. When `preset.register()` is called, the Python API automatically registers each scorer. If a scorer is already registered in the experiment, it uses the existing scorer ID instead of creating a duplicate.
+
+Each preset version snapshots the specific scorer versions it was created with, making versions immutable and reproducible:
 
 ```json
 {
   "name": "my_team_agent",
-  "version": 1,
-  "scorer_ids": ["scorer_abc123", "scorer_def456", "scorer_ghi789"]
+  "version": 2,
+  "scorers": [
+    {"scorer_id": "scorer_abc123", "scorer_version": 3},
+    {"scorer_id": "scorer_def456", "scorer_version": 1},
+    {"scorer_id": "scorer_ghi789", "scorer_version": 1}
+  ]
 }
 ```
 
