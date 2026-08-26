@@ -7,7 +7,7 @@
 
 | Author(s)              | [Nehanth Narendrula](https://github.com/Nehanth) (Red Hat) |
 | :--------------------- | :-- |
-| **Date Last Modified** | 2026-08-25 |
+| **Date Last Modified** | 2026-08-26 |
 | **AI Assistant(s)**    | Claude Code |
 
 **Table of contents**
@@ -53,7 +53,7 @@ client.create_webhook(
         "feedback_name": "correctness",
         "threshold": 0.7,
         "direction": "below",
-        "window_size": 10,
+        "window_minutes": 5,
         "cooldown_seconds": 1800,
     },
     secret="my-signing-secret",
@@ -72,9 +72,9 @@ The payload follows the same envelope every existing webhook uses (`entity`, `ac
         "trace_id": "tr-abc123",
         "feedback_name": "correctness",
         "value": 0.45,
-        "rolling_average": 0.62,
+        "window_average": 0.62,
         "threshold": 0.7,
-        "window_size": 10
+        "window_minutes": 5
     }
 }
 ```
@@ -110,12 +110,12 @@ One incident, end to end. A team runs a support agent in production, traced to M
 
    **UI path:** the webhooks management page's event picker includes the new events, with a form for threshold rules instead of hand-written configuration — and the experiment page offers **Set up alert** whenever automatic evaluations are running, pre-filled with the registered judge's name and a default threshold.
 
-2. **The quality signal.** At 2am, the agent's answers quietly get worse — nothing errors, nothing crashes. The team changed nothing: the provider silently updated the model behind the agent, and its behavior shifted. Requests keep succeeding, users start getting worse answers, and no infrastructure monitor anywhere has anything to say about it. The only thing in the stack that can notice is the correctness judge scoring the sampled traffic. As the scores come in lower, the rolling average crosses the threshold and the quality webhook fires. The team's endpoint routes it to Slack:
+2. **The quality signal.** At 2am, the agent's answers quietly get worse — nothing errors, nothing crashes. The team changed nothing: the provider silently updated the model behind the agent, and its behavior shifted. Requests keep succeeding, users start getting worse answers, and no infrastructure monitor anywhere has anything to say about it. The only thing in the stack that can notice is the correctness judge scoring the sampled traffic. As the scores come in lower, the windowed average crosses the threshold and the quality webhook fires. The team's endpoint routes it to Slack:
 
    ```
    MLflow quality alert
    Experiment: prod-support-agent
-   correctness: 0.45 (rolling average 0.62, threshold 0.70)
+   correctness: 0.45 (5-minute average 0.62, threshold 0.70)
    View traces: https://mlflow.example.com/experiments/12345/traces
    ```
 
@@ -142,7 +142,7 @@ One incident, end to end. A team runs a support agent in production, traced to M
 
 5. What happens after each signal is up to the team — a page, a Slack triage, a CI run, or an automated remediation pipeline. The webhooks' job was to make each signal available at the moment MLflow knew, instead of whenever someone next opened the UI.
 
-The `window_size` option triggers on a rolling average rather than a single score, because judge scores on individual traces are noisy. `cooldown_seconds` stops repeat firing while quality stays degraded. Both are optional; without them the rule fires on every score, which suits low-traffic experiments.
+The `window_minutes` option averages scores over a fixed window of time rather than reacting to a single score — judge scores on individual traces are noisy, and a fixed time unit behaves the same for busy and quiet agents alike. `cooldown_seconds` stops repeat firing while quality stays degraded. Both are optional; without them the rule fires on every score, which suits low-traffic experiments.
 
 ## Out of scope
 
@@ -168,7 +168,7 @@ Webhook events are validated against fixed entity and action lists, so this adds
 
 This proposal adds no background services: no scheduler, no monitor, no process watching the database. Each event is sent by code MLflow already runs, at the moment that code saves something — which is the same firing model the existing 15 events use.
 
-**`trace_feedback.threshold_breached` fires when a judge score is saved and trips a rule.** Automatic evaluations already run a scoring job inside the server: it picks up new traces, runs the LLM judges on a sample, and saves each score. This RFC adds one step right after that save — check the webhook rules for this experiment and feedback name, and send the event if the score or its rolling average crosses the threshold. Alerts are therefore only as fresh as the scoring behind them: latency is the scoring cadence plus delivery. This also holds up as the job framework ([RFC-0002](https://github.com/mlflow/rfcs/blob/main/rfcs/0002-job-executor-plugins/0002-job-executor-plugins.md)) evolves — whether scoring runs inside the server process or, once the [Docker and Kubernetes executors](https://github.com/mlflow/rfcs/pull/3) land, in its own container, the score is saved back through the server, and that is where the rule check and the webhook send happen. Webhook secrets never leave the server.
+**`trace_feedback.threshold_breached` fires when a judge score is saved and trips a rule.** Automatic evaluations already run a scoring job inside the server: it picks up new traces, runs the LLM judges on a sample, and saves each score. This RFC adds one step right after that save — check the webhook rules for this experiment and feedback name, and send the event if the score or its windowed average crosses the threshold. Alerts are therefore only as fresh as the scoring behind them: latency is the scoring cadence plus delivery. This also holds up as the job framework ([RFC-0002](https://github.com/mlflow/rfcs/blob/main/rfcs/0002-job-executor-plugins/0002-job-executor-plugins.md)) evolves — whether scoring runs inside the server process or, once the [Docker and Kubernetes executors](https://github.com/mlflow/rfcs/pull/3) land, in its own container, the score is saved back through the server, and that is where the rule check and the webhook send happen. Webhook secrets never leave the server.
 
 **`trace_issue.created` and `trace_issue.updated` fire when a detection run saves its findings.** The events hang off the end of the run, not the button that started it — so when detection is eventually started by an API call or a schedule instead of a person, the same events fire with no changes.
 
@@ -181,7 +181,7 @@ An event that fires on every individual judge score is deliberately not included
 The webhook entities themselves already exist; this proposal adds two small pieces of state, kept in the SQL backend the webhook system already requires and deleted with their webhook:
 
 1. **When each rule last fired**, to enforce `cooldown_seconds` — used by both the threshold event and `trace.errored`.
-2. **The last `window_size` scores** per threshold rule, so the rolling average can be evaluated the moment a new score is written, without re-querying past feedback.
+2. **The recent scores within each rule's time window**, so the windowed average can be evaluated the moment a new score is written, without re-querying past feedback.
 
 This is the first webhook feature that keeps state between deliveries. The footprint is one row per rule, plus one small score buffer per threshold rule.
 
@@ -212,6 +212,6 @@ TBD.
 
 # Open questions
 
-1. Should alert rules be configured on each webhook (the smallest change, matching how webhooks work today), or become their own concept that a user defines once and points at several destinations — Slack and PagerDuty from one rule? Compound conditions push strongly toward the latter: an experiment runs multiple scorers, and a team may want to alert only when several conditions hold together or when any one of them does (AND/OR across conditions, each with its own aggregate and window — count-based or time-based). That no longer fits naturally in a single webhook's filter, so the initial proposal keeps single-condition rules and leaves the rule primitive to the detailed design.
+1. Should alert rules be configured on each webhook (the smallest change, matching how webhooks work today), or become their own concept that a user defines once and points at several destinations — Slack and PagerDuty from one rule? Compound conditions push strongly toward the latter: an experiment runs multiple scorers, and a team may want to alert only when several conditions hold together or when any one of them does (AND/OR across conditions, each with its own aggregate and time window). That no longer fits naturally in a single webhook's filter, so the initial proposal keeps single-condition rules and leaves the rule primitive to the detailed design. Review feedback also points to an in-progress design for aggregating trace signals into fixed-unit metrics for alerting; combining with that work would put the rule layer there, with webhooks simply subscribing to the events it emits.
 2. Should an alert also fire when data stops arriving entirely? An agent that produces no traces at all is arguably the worst failure, and a rule that only evaluates when scores are written stays silent through it. Some agents legitimately go quiet (a chat agent nobody is chatting with, a monitoring agent whose trigger condition has not occurred), so a blunt no-data alert would false-positive on them. Possible mechanisms: alerting on statistically unusual gaps relative to the agent's own trace cadence, or tracking agent-trigger events separately and alerting only when the agent triggers but no reasoning occurs — with the alert being opt-in for agents where quiet is normal.
 3. Should the issue detection endpoints be stabilized and documented as part of this work, so consumers of the issue events have a supported way to look up the issues they reference?
