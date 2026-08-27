@@ -7,7 +7,7 @@
 
 | Author(s)              | [Nehanth Narendrula](https://github.com/Nehanth) (Red Hat) |
 | :--------------------- | :-- |
-| **Date Last Modified** | 2026-08-25 |
+| **Date Last Modified** | 2026-08-27 |
 | **AI Assistant(s)**    | Claude Code |
 
 **Table of contents**
@@ -139,7 +139,7 @@ The fix pipeline is three phases, each behind its own pluggable interface. The j
 
 **2. Apply a fix.** How a diagnosis becomes file changes in that checkout. Backends: OpenCode (the bundled, MIT-licensed default), Claude Code, other coding agents, or a plain script for mechanical fixes with no model calls at all. The backend is invoked in the workspace with the diagnosis and trace evidence as input, edits files, and exits. The only secret this phase ever sees is its own model access (an AI Gateway endpoint) — the interfaces on either side hold the repository credentials, so a coding agent structurally cannot touch them.
 
-**3. Submit for human review.** How the changed code reaches people. Backends: a GitHub pull request (default), a GitLab merge request, a patch bundle, a pushed branch for teams with their own review tooling, or delegating to a forge's own coding agent (for example, filing a GitHub issue assigned to Copilot). **Copy prompt** is the simplest backend of all: no checkout and no branch — MLflow hands the user the diagnosis and evidence as a ready-made prompt for whatever coding agent they drive themselves, skipping phases 1 and 2 entirely.
+**3. Submit for human review.** How the changed code reaches people. Backends: a GitHub pull request (default), a GitLab merge request, a patch bundle, a pushed branch for teams with their own review tooling, or delegating to a forge's own coding agent (for example, filing a GitHub issue assigned to Copilot). **Copy prompt** is the simplest backend of all: no checkout and no branch — MLflow hands the user the diagnosis and evidence as a ready-made prompt for whatever coding agent they drive themselves, skipping phases 1 and 2 entirely. Copy prompt is available both as a UI action and programmatically — an API returns the fix prompt for a diagnosis, so enterprise teams can feed it into their own managed coding agents or software-factory pipelines without going through the UI.
 
 ## Everything runs on the job framework
 
