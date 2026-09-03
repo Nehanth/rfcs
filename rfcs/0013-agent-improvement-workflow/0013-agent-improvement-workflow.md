@@ -7,7 +7,7 @@
 
 | Author(s)              | [Nehanth Narendrula](https://github.com/Nehanth) (Red Hat) |
 | :--------------------- | :-- |
-| **Date Last Modified** | 2026-08-27 |
+| **Date Last Modified** | 2026-09-01 |
 | **AI Assistant(s)**    | Claude Code |
 
 **Table of contents**
@@ -40,7 +40,7 @@ The building blocks are things MLflow has today or will have once its in-flight 
 import mlflow
 
 # One-time setup: connect the agent's repository to the experiment
-mlflow.genai.connect_repo(
+mlflow.connect_repo(
     experiment_id="12345",
     repo_url="https://github.com/acme/support-agent",
     token_secret="github-pat",   # stored via MLflow secret handling
